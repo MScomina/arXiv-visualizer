@@ -154,5 +154,6 @@ Makefile
 
 .continue
 data/
+models/
 *.txt
 !requirements.txt
