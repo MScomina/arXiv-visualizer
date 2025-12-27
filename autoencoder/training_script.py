@@ -10,13 +10,14 @@ import os
 import sys
 from torch.utils.data import TensorDataset, DataLoader, random_split, IterableDataset
 
-EPOCHS = 50
-BATCH_SIZE = 2048
-TRAINING_RATE = 0.0001
-DROPOUT = 0.1
-GAMMA = 0.95
-WEIGHT_DECAY = 1e-5
 RANDOM_STATE = 31412718
+
+EPOCHS = 250
+BATCH_SIZE = 2048
+TRAINING_RATE = 0.0005
+DROPOUT = 0.1
+GAMMA = 0.99
+WEIGHT_DECAY = 1e-5
 TRAIN_VAL_TEST_SPLIT = (0.8, 0.1, 0.1)
 
 IN_DIMENSIONS = 768
@@ -27,7 +28,7 @@ CHUNKSIZE = BATCH_SIZE*16
 DATASET_PATH = "./data/processed/embeddings.json"
 LOG_FILE = f"./models/ae - {HIDDEN_LAYERS} - {LATENT_SPACE}.log"
 MODEL_FILE = f"./models/ae - {HIDDEN_LAYERS} - {LATENT_SPACE}.pt"
-N_ROWS = 2100000
+N_ROWS = 2200000    # Lower this number if you're having problems with RAM.
 
 PRINT_EVERY = 25
 
@@ -248,7 +249,7 @@ def main():
         gamma=GAMMA
     )
 
-    mse_loss = torch.nn.MSELoss(reduction="mean")
+    huber_loss = torch.nn.HuberLoss(delta=0.5)
 
     logging.basicConfig(
         level=logging.INFO,
@@ -271,13 +272,13 @@ def main():
     for epoch in range(EPOCHS):
             
         epoch_loss, n_train = train_epoch_dl(autoencoder, loaders["train"],
-                                                  optimizer, mse_loss, device, logger)
+                                                  optimizer, huber_loss, device, logger)
             
         val_loss, n_val = eval_epoch_dl(autoencoder, loaders["val"],
-                                            mse_loss, device)
+                                            huber_loss, device)
             
         test_loss, n_test = eval_epoch_dl(autoencoder, loaders["test"],
-                                              mse_loss, device)
+                                              huber_loss, device)
 
             
         if val_loss < best_loss and epoch > 0:
