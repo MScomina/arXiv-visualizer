@@ -5,7 +5,7 @@ import torch.distributions
 class ResidualBlock(nn.Module):
     def __init__(self, in_dim: int, out_dim: int, dropout: float = 0.2):
         super().__init__()
-        self.map = nn.Linear(in_dim, out_dim, bias=False)
+        self.map = nn.Linear(in_dim, out_dim)
         self.bn  = nn.BatchNorm1d(out_dim)
         self.act = nn.GELU()
         self.drop= nn.Dropout(dropout)
@@ -25,6 +25,29 @@ class ResidualBlock(nn.Module):
         # residual shortcut
         res = self.proj(x)
         return out + res
+
+class Encoder(nn.Module):
+    def __init__(
+        self,
+        in_dimensions: int = 768,
+        hidden_layers: tuple[int, ...] = (512, 256),
+        latent_size: int = 128,
+        dropout: float = 0.2,
+        beta: float = 1.0,
+    ):
+        super().__init__()
+
+        layers = []
+        inp = in_dimensions
+        if hidden_layers:
+            for h in hidden_layers:
+                layers.append(ResidualBlock(inp, h, dropout))
+                inp = h
+        layers.append(nn.Linear(inp, latent_size))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, z: torch.Tensor):
+        return self.net(z)
 
 class VariationalEncoder(nn.Module):
     def __init__(
@@ -118,20 +141,33 @@ class VAE(nn.Module):
         )
 
     def forward(self, x: torch.Tensor):
-        """
-        Forward pass of the VAE.
-
-        Returns
-        -------
-        recon  : Tensor
-            Reconstructed input.
-        mu     : Tensor
-            Mean of the approximate posterior.
-        logvar : Tensor
-            Log‑variance of the approximate posterior.
-        kl     : Tensor
-            KL divergence term.
-        """
         z, mu, logv, kl = self.var_encoder(x)
         recon = self.decoder(z)
         return recon, mu, logv, kl
+
+class AE(nn.Module):
+    def __init__(
+        self,
+        in_dimensions: int = 768,
+        hidden_layers: tuple[int, ...] = (512, 256),
+        latent_size: int = 128,
+        dropout: float = 0.2
+    ):
+        super().__init__()
+        self.encoder = Encoder(
+            in_dimensions=in_dimensions,
+            hidden_layers=hidden_layers,
+            latent_size=latent_size,
+            dropout=dropout
+        )
+
+        self.decoder = Decoder(
+            latent_dims=latent_size,
+            hidden_layers=hidden_layers,
+            out_dims=in_dimensions,
+            dropout=dropout,
+        )
+
+    def forward(self, x: torch.Tensor):
+        x = self.encoder(x)
+        return self.decoder(x)
