@@ -12,11 +12,11 @@ from torch.utils.data import TensorDataset, DataLoader, random_split, IterableDa
 
 RANDOM_STATE = 31412718
 
-EPOCHS = 250
+EPOCHS = 50
 BATCH_SIZE = 2048
-TRAINING_RATE = 0.0005
+TRAINING_RATE = 0.0002
 DROPOUT = 0.1
-GAMMA = 0.99
+GAMMA = 0.95
 WEIGHT_DECAY = 1e-5
 TRAIN_VAL_TEST_SPLIT = (0.8, 0.1, 0.1)
 
@@ -28,7 +28,7 @@ CHUNKSIZE = BATCH_SIZE*16
 DATASET_PATH = "./data/processed/embeddings.json"
 LOG_FILE = f"./models/ae - {HIDDEN_LAYERS} - {LATENT_SPACE}.log"
 MODEL_FILE = f"./models/ae - {HIDDEN_LAYERS} - {LATENT_SPACE}.pt"
-N_ROWS = 2200000    # Lower this number if you're having problems with RAM.
+N_ROWS = 2300000    # Lower this number if you're having problems with RAM.
 
 PRINT_EVERY = 25
 
@@ -47,7 +47,7 @@ class SequentialJsonlDataset(IterableDataset):
         for chunk in pd.read_json(self.path, lines=True,
                                   chunksize=self.chunk_size,
                                   nrows=self.max_rows):
-            # ``chunk["embedding"]`` is a Series of lists
+
             for emb in chunk["embedding"]:
                 yield torch.tensor(emb, dtype=self.dtype)
                 rows_yielded += 1
@@ -179,7 +179,7 @@ def split_indices(num_samples: int, ratios: tuple[float, float, float], seed: in
     test_idx  = indices[n_train+n_val:]
     return train_idx, val_idx, test_idx
 
-def train_epoch_dl(autoencoder, loader, optimizer, loss_fn, device, logger):
+def train_epoch_dl(autoencoder, loader, optimizer, loss_fn, device, logger, mean = 0, std = 1):
 
     autoencoder.train()
     epoch_loss, n_samples = 0.0, 0
@@ -188,6 +188,7 @@ def train_epoch_dl(autoencoder, loader, optimizer, loss_fn, device, logger):
     for batch in loader:
         batch = batch[0].to(device)
         x = batch
+        x = _normalize(x, mean, std)
 
         optimizer.zero_grad()
         recon = autoencoder(x)
@@ -207,7 +208,7 @@ def train_epoch_dl(autoencoder, loader, optimizer, loss_fn, device, logger):
     return epoch_loss, n_samples
 
 
-def eval_epoch_dl(autoencoder, loader, loss_fn, device):
+def eval_epoch_dl(autoencoder, loader, loss_fn, device, mean = 0, std = 1):
 
     autoencoder.eval()
     epoch_loss, n_samples = 0.0, 0
@@ -216,6 +217,7 @@ def eval_epoch_dl(autoencoder, loader, loss_fn, device):
         for batch in loader:
             batch = batch[0].to(device)
             x = batch
+            x = _normalize(x, mean, std)
             recon = autoencoder(x)
             loss  = loss_fn(recon, x)
             epoch_loss += loss.item() * x.size(0)
@@ -272,13 +274,13 @@ def main():
     for epoch in range(EPOCHS):
             
         epoch_loss, n_train = train_epoch_dl(autoencoder, loaders["train"],
-                                                  optimizer, huber_loss, device, logger)
+                                                  optimizer, huber_loss, device, logger, mean=mean, std=std)
             
         val_loss, n_val = eval_epoch_dl(autoencoder, loaders["val"],
-                                            huber_loss, device)
+                                            huber_loss, device, mean=mean, std=std)
             
         test_loss, n_test = eval_epoch_dl(autoencoder, loaders["test"],
-                                              huber_loss, device)
+                                              huber_loss, device, mean=mean, std=std)
 
             
         if val_loss < best_loss and epoch > 0:

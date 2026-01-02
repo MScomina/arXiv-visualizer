@@ -1,3 +1,4 @@
+import os
 import json
 import torch
 from autoencoder import AE
@@ -11,6 +12,18 @@ CHUNK_SIZE = BATCH_SIZE*16
 DATASET_PATH = "./data/processed/embeddings.json"
 AUTOENCODER_PATH = f"./models/ae - {HIDDEN_LAYERS} - {LATENT_SPACE}.pt"
 COMPRESSED_PATH = "./data/processed/compressed_embeddings.json"
+
+def _normalize(batch : torch.Tensor, mean, std) -> torch.Tensor | None:
+    return (batch - mean) / std
+
+def _load_stats(path: str = DATASET_PATH):
+    stats_file = f"{path}.stats.pt"
+    if os.path.exists(stats_file):
+        cached = torch.load(stats_file)
+        return cached["mean"], cached["std"]
+    else:
+        print("Mean and std file not found, please run training_script.py first.")
+        return
 
 def load_autoencoder():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -46,6 +59,13 @@ def chunker(generator, size):
         yield chunk
 
 def main():
+
+    if os.path.exists(COMPRESSED_PATH):
+        response = input("Compressed embeddings already exist, regenerate them? (y to proceed): ").strip().lower()
+        if response != "y":
+            print("Exiting...")
+            return
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = load_autoencoder()
     if model is None:
@@ -61,6 +81,9 @@ def main():
                 dtype=torch.float32,
                 device=device,
             )
+            mean, std = _load_stats()
+
+            batch_embeddings = _normalize(batch_embeddings, mean, std)
 
             with torch.no_grad():
                 latent = model.encoder(batch_embeddings).cpu().numpy()
