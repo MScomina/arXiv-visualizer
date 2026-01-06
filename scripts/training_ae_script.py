@@ -3,12 +3,17 @@ import torch
 import torch.nn.functional as F
 import hashlib
 import pandas as pd
-from autoencoder import AE
 
 import logging
 import os
 import sys
 from torch.utils.data import TensorDataset, DataLoader, random_split, IterableDataset
+
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from autoencoder.autoencoder import AE
 
 RANDOM_STATE = 31412718
 

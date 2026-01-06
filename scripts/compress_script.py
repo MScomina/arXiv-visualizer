@@ -1,7 +1,12 @@
 import os
 import json
 import torch
-from autoencoder import AE
+
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from autoencoder.autoencoder import AE
 
 IN_DIMENSIONS = 768
 HIDDEN_LAYERS = (512, 512, 384, 384, 256, 256, 192, 192, 128, 128)
