@@ -8,11 +8,13 @@ from sklearn.preprocessing import StandardScaler
 from scipy.spatial import procrustes
 from scipy.linalg import orthogonal_procrustes
 
-DATASET_PATH = "./data/processed/embeddings.json"
-COMPRESSED_PATH = "./data/processed/compressed_embeddings.json"
+from data_loader import stream_dataset
+
+DATASET_PATH = "./data/processed/embeddings.parquet"
+COMPRESSED_PATH = "./data/processed/compressed_embeddings.parquet"
 
 # UMAP parameters
-N_SAMPLES = 10000
+N_SAMPLES = 50000
 N_NEIGHBORS = 50
 
 def align_points(X, Y):
@@ -28,15 +30,11 @@ def align_points(X, Y):
 
     return Y_aligned, {"R": R, "scale": scale, "translation": X.mean(axis=0)}
 
-def sample_dataset(file_path, sample_size=N_SAMPLES):
-    df = pd.read_json(file_path, lines=True, nrows=sample_size)
-    return df["embedding"].tolist()
-
 def main():
-    samples = np.array(sample_dataset(DATASET_PATH))
+    samples = np.array(next(stream_dataset(DATASET_PATH, ["embedding"], N_SAMPLES, N_SAMPLES))["embedding"])
     samples = StandardScaler().fit_transform(samples)
 
-    compressed_samples = np.array(sample_dataset(COMPRESSED_PATH))
+    compressed_samples = np.array(next(stream_dataset(COMPRESSED_PATH, ["embedding"], N_SAMPLES, N_SAMPLES))["embedding"])
     compressed_samples = StandardScaler().fit_transform(compressed_samples)
 
     umap_normal = umap.UMAP(

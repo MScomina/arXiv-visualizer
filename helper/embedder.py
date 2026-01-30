@@ -15,7 +15,6 @@ def _clean_abstract(text):
     text = re.sub(r'\[citation\]', '', text)
     text = re.sub(r'https?://\S+', '', text)
     text = re.sub(r'\$[^\$]*\$', '', text)
-    text = re.sub(r'\$[^\$]*\$', '', text)
     return text.strip()
 
 def embed_batch(abstracts, tokenizer, model, batch_size=32, clean_abstracts=True):

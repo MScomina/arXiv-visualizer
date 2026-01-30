@@ -13,11 +13,12 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+from helper.data_loader import stream_dataset
 from autoencoder.autoencoder import AE
 
 RANDOM_STATE = 31412718
 
-EPOCHS = 50
+EPOCHS = 0
 BATCH_SIZE = 2048
 TRAINING_RATE = 0.0002
 DROPOUT = 0.1
@@ -28,40 +29,18 @@ TRAIN_VAL_TEST_SPLIT = (0.8, 0.1, 0.1)
 IN_DIMENSIONS = 768
 HIDDEN_LAYERS = (512, 512, 384, 384, 256, 256, 192, 192, 128, 128)
 LATENT_SPACE = 64
-CHUNKSIZE = BATCH_SIZE*16
+CHUNK_SIZE = 50_000
 
-DATASET_PATH = "./data/processed/embeddings.json"
+DATASET_PATH = "./data/processed/embeddings.parquet"
 LOG_FILE = f"./models/ae - {HIDDEN_LAYERS} - {LATENT_SPACE}.log"
 MODEL_FILE = f"./models/ae - {HIDDEN_LAYERS} - {LATENT_SPACE}.pt"
-N_ROWS = 2300000    # Lower this number if you're having problems with RAM.
+N_ROWS = 3_000_000    # Lower this number if you're having problems with RAM.
 
 PRINT_EVERY = 25
 
-class SequentialJsonlDataset(IterableDataset):
-
-    def __init__(self, path: str, dtype: torch.dtype = torch.float32,
-                 chunk_size: int = CHUNKSIZE, max_rows: int | None = N_ROWS):
-        self.path = path
-        self.dtype = dtype
-        self.chunk_size = chunk_size
-        self.max_rows = max_rows
-
-    def __iter__(self):
-
-        rows_yielded = 0
-        for chunk in pd.read_json(self.path, lines=True,
-                                  chunksize=self.chunk_size,
-                                  nrows=self.max_rows):
-
-            for emb in chunk["embedding"]:
-                yield torch.tensor(emb, dtype=self.dtype)
-                rows_yielded += 1
-                if self.max_rows is not None and rows_yielded >= self.max_rows:
-                    return
-
 def _compute_stats(path: str = DATASET_PATH,
                    dtype: torch.dtype = torch.float32,
-                   chunk_size: int = CHUNKSIZE,
+                   chunk_size: int = CHUNK_SIZE,
                    ratios: tuple[float, float, float] = TRAIN_VAL_TEST_SPLIT) -> tuple[torch.Tensor, torch.Tensor]:
 
     stats_file = f"{path}.stats.pt"
@@ -83,7 +62,7 @@ def _compute_stats(path: str = DATASET_PATH,
             return None
 
     idx = 0
-    for chunk in pd.read_json(path, lines=True, chunksize=chunk_size):
+    for chunk in stream_dataset(path, ["embedding"], N_ROWS, chunk_size):
         for emb in chunk["embedding"]:
             if _bucket(idx) != "train":
                 idx += 1
@@ -98,34 +77,14 @@ def _compute_stats(path: str = DATASET_PATH,
     var  = total_sumsq / total_n - mean.pow(2)
     std  = torch.sqrt(var.clamp_min(1e-8))
 
-    # Save computed statistics for future runs
     torch.save({"mean": mean, "std": std}, stats_file)
 
     return mean, std
 
-    idx = 0
-    for chunk in pd.read_json(path, lines=True, chunksize=chunk_size):
-        for emb in chunk["embedding"]:
-            if _bucket(idx) != "train":
-                idx += 1
-                continue
-            idx += 1
-            vec = torch.tensor(emb, dtype=dtype)
-            total_sum   += vec.sum()
-            total_sumsq += (vec ** 2).sum()
-            total_n     += vec.numel()
-
-    mean = total_sum / total_n
-    var  = total_sumsq / total_n - mean.pow(2)
-    std  = torch.sqrt(var.clamp_min(1e-8))
-    return mean, std
-
-
 def _normalize(batch : torch.Tensor, mean, std) -> torch.Tensor:
     return (batch - mean) / std
 
-
-def create_loaders_from_file(
+def create_loaders(
     path: str,
     ratios: tuple[float, float, float] = (0.8, 0.1, 0.1),
     batch_size: int = 256,
@@ -134,11 +93,8 @@ def create_loaders_from_file(
 ) -> dict[str, DataLoader]:
 
     embeddings = []
-    for chunk in pd.read_json(path, lines=True,
-                              chunksize=CHUNKSIZE,
-                              nrows=n_rows if n_rows is not None else N_ROWS):
-        embeddings.append(torch.tensor(chunk["embedding"].values.tolist(),
-                                       dtype=dtype))
+    for chunk in stream_dataset(path, ["embedding"], n_rows if n_rows is not None else N_ROWS, CHUNK_SIZE):
+        embeddings.append(torch.tensor(chunk["embedding"], dtype=dtype))
     data_tensor = torch.cat(embeddings, dim=0)
 
     train_idx, val_idx, test_idx = split_indices(len(data_tensor), ratios)
@@ -152,7 +108,6 @@ def create_loaders_from_file(
     test_loader  = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 
     return {"train": train_loader, "val": val_loader, "test": test_loader}
-
 
 
 def get_data_loaders(data: torch.Tensor,
@@ -231,6 +186,7 @@ def eval_epoch_dl(autoencoder, loader, loss_fn, device, mean = 0, std = 1):
     return epoch_loss, n_samples
 
 def main():
+    
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     autoencoder = AE(
@@ -274,7 +230,7 @@ def main():
 
     best_loss = float("inf")
 
-    loaders = create_loaders_from_file(DATASET_PATH, TRAIN_VAL_TEST_SPLIT, BATCH_SIZE, n_rows=N_ROWS)
+    loaders = create_loaders(DATASET_PATH, TRAIN_VAL_TEST_SPLIT, BATCH_SIZE, n_rows=N_ROWS)
 
     for epoch in range(EPOCHS):
             
