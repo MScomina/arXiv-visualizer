@@ -16,7 +16,7 @@ HIDDEN_LAYERS = (512, 512, 384, 384, 256, 256, 192, 192, 128, 128)
 LATENT_SPACE = 64
 BATCH_SIZE = 2048
 CHUNK_SIZE = BATCH_SIZE*16
-MAX_ROWS = 3_000_000
+MAX_ROWS = 2_914_060
 
 DATASET_PATH = "./data/processed/embeddings.parquet"
 COMPRESSED_PATH = "./data/processed/compressed_embeddings.parquet"
@@ -69,37 +69,49 @@ def main():
     all_ids = []
     all_embeddings = []
     all_abstracts = []
+    all_titles = []
 
-    for chunk in stream_dataset(DATASET_PATH, ["id", "embedding", "abstract"], MAX_ROWS, CHUNK_SIZE):
+    for chunk in stream_dataset(DATASET_PATH, ["id", "title", "embedding", "abstract"], MAX_ROWS, CHUNK_SIZE):
         batch_embeddings = torch.tensor(
             chunk["embedding"],
             dtype=torch.float32,
             device=device,
         )
         mean, std = _load_stats()
+        mean = mean.to(device)
+        std = std.to(device)
         batch_embeddings = _normalize(batch_embeddings, mean, std)
 
         with torch.no_grad():
             latent = model.encoder(batch_embeddings).cpu().numpy()
 
-        for id_, vector, abstract in zip(chunk["id"], latent, chunk["abstract"]):
+        for id_, vector, abstract, title in zip(chunk["id"], latent, chunk["abstract"], chunk["title"]):
             all_ids.append(id_)
             all_embeddings.append(vector.tolist())
             all_abstracts.append(abstract)
+            all_titles.append(title)
 
     table = pa.Table.from_arrays(
         [
             pa.array(all_ids),
             pa.array(all_embeddings),
-            pa.array(all_abstracts)
+            pa.array(all_abstracts),
+            pa.array(all_titles)
         ],
-        names=["id", "embedding", "abstract"]
+        names=["id", "embedding", "abstract", "title"]
     )
 
-    parquet_path = COMPRESSED_PATH
-    pq.write_table(table, parquet_path)
+    writer = pq.ParquetWriter(
+        COMPRESSED_PATH,
+        table.schema,
+        compression="snappy",
+        use_dictionary=True,
+        write_statistics=True
+    )
 
-    print(f"Compressed embeddings saved to {parquet_path}.")
+    writer.write_table(table)
+
+    print(f"Compressed embeddings saved to {COMPRESSED_PATH}.")
 
 if __name__ == "__main__":
     main()

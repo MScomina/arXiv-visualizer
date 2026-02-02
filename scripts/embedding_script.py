@@ -12,7 +12,7 @@ from helper.embedder import embed_batch
 from helper.data_loader import stream_dataset
 from transformers import AutoTokenizer, AutoModel
 
-N_ROWS = 3_000_000
+N_ROWS = 2_914_060
 BATCH_SIZE = 64
 CHUNK_SIZE = BATCH_SIZE*128
 DATASET_PATH = "./data/arxiv-metadata-oai-snapshot.json"
@@ -43,7 +43,7 @@ def main():
 
     writer : pq.ParquetWriter | None = None
 
-    for chunk in stream_dataset(DATASET_PATH, ["id", "abstract"], N_ROWS, CHUNK_SIZE):
+    for chunk in stream_dataset(DATASET_PATH, ["id", "title", "abstract"], N_ROWS, CHUNK_SIZE):
 
         embeddings = embed_batch(
             chunk["abstract"], 
@@ -61,7 +61,8 @@ def main():
                 PROCESSED_FILE,
                 table.schema,
                 compression="snappy",
-                use_dictionary=True
+                use_dictionary=True,
+                write_statistics=True
             )
 
         writer.write_table(table)

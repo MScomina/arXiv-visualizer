@@ -7,19 +7,19 @@ import pandas as pd
 import logging
 import os
 import sys
-from torch.utils.data import TensorDataset, DataLoader, random_split, IterableDataset
+from torch.utils.data import DataLoader, random_split
+from torch import Tensor
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from helper.data_loader import stream_dataset
+from helper.data_loader import stream_dataset, EmbeddingStreamDataset, SubsetIterable
 from autoencoder.autoencoder import AE
 
 RANDOM_STATE = 31412718
 
-EPOCHS = 0
-BATCH_SIZE = 2048
+EPOCHS = 25
 TRAINING_RATE = 0.0002
 DROPOUT = 0.1
 GAMMA = 0.95
@@ -29,55 +29,66 @@ TRAIN_VAL_TEST_SPLIT = (0.8, 0.1, 0.1)
 IN_DIMENSIONS = 768
 HIDDEN_LAYERS = (512, 512, 384, 384, 256, 256, 192, 192, 128, 128)
 LATENT_SPACE = 64
-CHUNK_SIZE = 50_000
 
 DATASET_PATH = "./data/processed/embeddings.parquet"
 LOG_FILE = f"./models/ae - {HIDDEN_LAYERS} - {LATENT_SPACE}.log"
 MODEL_FILE = f"./models/ae - {HIDDEN_LAYERS} - {LATENT_SPACE}.pt"
-N_ROWS = 3_000_000    # Lower this number if you're having problems with RAM.
+
+# Lower either of these numbers if you're having problems with RAM.
+N_ROWS = 2_914_060
+BATCH_SIZE = 16384
+MINIBATCH_AMOUNT = 8
+PREFETCH_FACTOR = 1
+
+VAL_EVERY = 10
+
+# Adjust this based on your computer specs.
+NUM_WORKERS = 8
 
 PRINT_EVERY = 25
 
-def _compute_stats(path: str = DATASET_PATH,
-                   dtype: torch.dtype = torch.float32,
-                   chunk_size: int = CHUNK_SIZE,
-                   ratios: tuple[float, float, float] = TRAIN_VAL_TEST_SPLIT) -> tuple[torch.Tensor, torch.Tensor]:
+def _chunk_collate(batch: list[torch.Tensor]) -> torch.Tensor:
+    return torch.cat(batch, dim=0)
 
-    stats_file = f"{path}.stats.pt"
-    if os.path.exists(stats_file):
+def _compute_stats(
+    loader: DataLoader,
+    stats_file : str,
+    *,
+    dtype: torch.dtype = torch.float32
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if stats_file and os.path.exists(stats_file):
         cached = torch.load(stats_file)
         return cached["mean"], cached["std"]
 
-    total_sum, total_sumsq = torch.tensor(0., dtype=dtype), torch.tensor(0., dtype=dtype)
-    total_n = 0
+    n_samples = 0
+    mean = torch.zeros(0, dtype=torch.float32)
+    M2 = torch.zeros(0, dtype=torch.float32)
 
-    thresholds = np.cumsum(np.array(ratios))
-    def _bucket(idx: int) -> str:
-        rnd_bytes = hashlib.sha256(str(idx).encode()).digest()
-        rnd_val = int.from_bytes(rnd_bytes[:8], "big") / 2**64
+    with torch.no_grad():
+        for batch in loader:
+            data = batch[0] if isinstance(batch, (tuple, list)) else batch
+            B, D = data.shape
+            if mean.numel() == 0:
+                mean = torch.zeros(D, dtype=torch.float32)
+                M2   = torch.zeros(D, dtype=torch.float32)
 
-        if rnd_val < thresholds[0]:
-            return "train"
-        else:
-            return None
+            vec = data.to(torch.float32)
 
-    idx = 0
-    for chunk in stream_dataset(path, ["embedding"], N_ROWS, chunk_size):
-        for emb in chunk["embedding"]:
-            if _bucket(idx) != "train":
-                idx += 1
-                continue
-            idx += 1
-            vec = torch.tensor(emb, dtype=dtype)
-            total_sum   += vec.sum()
-            total_sumsq += (vec ** 2).sum()
-            total_n     += vec.numel()
+            n_prev = n_samples
+            n_samples += B
+            delta = vec - mean.unsqueeze(0)
+            mean += delta.sum(dim=0) / n_samples
+            delta2 = vec - mean.unsqueeze(0)
+            M2   += (delta * delta2).sum(dim=0)
 
-    mean = total_sum / total_n
-    var  = total_sumsq / total_n - mean.pow(2)
-    std  = torch.sqrt(var.clamp_min(1e-8))
+    var = M2 / (n_samples - 1)
+    std = torch.sqrt(var.clamp_min(1e-8))
 
-    torch.save({"mean": mean, "std": std}, stats_file)
+    mean = mean.float()
+    std  = std.float()
+
+    if stats_file:
+        torch.save({"mean": mean, "std": std}, stats_file)
 
     return mean, std
 
@@ -87,43 +98,56 @@ def _normalize(batch : torch.Tensor, mean, std) -> torch.Tensor:
 def create_loaders(
     path: str,
     ratios: tuple[float, float, float] = (0.8, 0.1, 0.1),
-    batch_size: int = 256,
+    batch_size: int = BATCH_SIZE,
     dtype: torch.dtype = torch.float32,
     n_rows: int | None = None,
+    num_workers: int = NUM_WORKERS,
+    prefetch_factor : int = PREFETCH_FACTOR,
+    pin_memory: bool = True
 ) -> dict[str, DataLoader]:
 
-    embeddings = []
-    for chunk in stream_dataset(path, ["embedding"], n_rows if n_rows is not None else N_ROWS, CHUNK_SIZE):
-        embeddings.append(torch.tensor(chunk["embedding"], dtype=dtype))
-    data_tensor = torch.cat(embeddings, dim=0)
+    base_ds = EmbeddingStreamDataset(
+        path=path,
+        dtype=dtype,
+        n_rows=n_rows,
+        batch_size=batch_size,
+    )
 
-    train_idx, val_idx, test_idx = split_indices(len(data_tensor), ratios)
+    total_chunks = (N_ROWS if n_rows is None else n_rows + batch_size - 1) // batch_size
 
-    train_ds = TensorDataset(data_tensor[train_idx])
-    val_ds   = TensorDataset(data_tensor[val_idx])
-    test_ds  = TensorDataset(data_tensor[test_idx])
+    train_c, val_c, test_c = split_indices(total_chunks, ratios)
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader   = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
-    test_loader  = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+    train_ds = SubsetIterable(base_ds, train_c)
+    val_ds   = SubsetIterable(base_ds, val_c)
+    test_ds  = SubsetIterable(base_ds, test_c)
 
-    return {"train": train_loader, "val": val_loader, "test": test_loader}
-
-
-def get_data_loaders(data: torch.Tensor,
-                     ratios: tuple[float, float, float],
-                     batch_size: int,
-                     dtype: torch.dtype = torch.float32):
-
-    train_idx, val_idx, test_idx = split_indices(len(data), ratios)
-
-    train_ds = TensorDataset(data[train_idx])
-    val_ds   = TensorDataset(data[val_idx])
-    test_ds  = TensorDataset(data[test_idx])
-
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader   = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
-    test_loader  = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=1,   # Batch size is already determined by the IterableDataset.
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        collate_fn=_chunk_collate,
+        prefetch_factor=prefetch_factor
+    )
+    val_loader   = DataLoader(
+        val_ds,
+        batch_size=1,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        collate_fn=_chunk_collate,
+        prefetch_factor=prefetch_factor
+    )
+    test_loader  = DataLoader(
+        test_ds,
+        batch_size=1,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        collate_fn=_chunk_collate,
+        prefetch_factor=prefetch_factor
+    )
 
     return {"train": train_loader, "val": val_loader, "test": test_loader}
 
@@ -137,6 +161,7 @@ def split_indices(num_samples: int, ratios: tuple[float, float, float], seed: in
     train_idx = indices[:n_train]
     val_idx   = indices[n_train:n_train+n_val]
     test_idx  = indices[n_train+n_val:]
+
     return train_idx, val_idx, test_idx
 
 def train_epoch_dl(autoencoder, loader, optimizer, loss_fn, device, logger, mean = 0, std = 1):
@@ -145,25 +170,32 @@ def train_epoch_dl(autoencoder, loader, optimizer, loss_fn, device, logger, mean
     epoch_loss, n_samples = 0.0, 0
     batch_cnt = 0
 
-    for batch in loader:
-        batch = batch[0].to(device)
-        x = batch
-        x = _normalize(x, mean, std)
+    for large_batch in loader:
+        large_batch = large_batch.to(device)
+        large_batch = _normalize(large_batch, mean, std)
 
-        optimizer.zero_grad()
-        recon = autoencoder(x)
-        loss  = loss_fn(recon, x)
-        loss.backward()
-        optimizer.step()
+        mini_size = BATCH_SIZE // MINIBATCH_AMOUNT
 
-        epoch_loss += loss.item() * x.size(0)
-        n_samples  += x.size(0)
-        batch_cnt  += 1
+        for batch in torch.split(large_batch, mini_size, dim=0):
+            
+            x = batch
+            optimizer.zero_grad()
+            recon = autoencoder(x)
+            loss  = loss_fn(recon, x)
+            loss.backward()
+            optimizer.step()
 
-        if batch_cnt % PRINT_EVERY == 0:
-            avg_loss = epoch_loss / n_samples
-            logger.info(f"[{batch_cnt:>6d} train] "
-                        f"avg train loss (so far) = {avg_loss:.8f}")
+            epoch_loss += loss.item() * x.size(0)
+            n_samples  += x.size(0)
+            batch_cnt  += 1
+
+            if batch_cnt % PRINT_EVERY == 0:
+                avg_loss = epoch_loss / n_samples
+                logger.info(f"[{batch_cnt:>6d} train] "
+                            f"avg train loss (so far) = {avg_loss:.8f}")
+
+        if batch_cnt >= len(loader)*MINIBATCH_AMOUNT:
+            break
 
     return epoch_loss, n_samples
 
@@ -174,18 +206,28 @@ def eval_epoch_dl(autoencoder, loader, loss_fn, device, mean = 0, std = 1):
     epoch_loss, n_samples = 0.0, 0
 
     with torch.no_grad():
+        batch_cnt = 0
         for batch in loader:
-            batch = batch[0].to(device)
+            batch = batch.to(device)
             x = batch
             x = _normalize(x, mean, std)
             recon = autoencoder(x)
             loss  = loss_fn(recon, x)
             epoch_loss += loss.item() * x.size(0)
             n_samples  += x.size(0)
+            batch_cnt += 1
+
+            if batch_cnt >= len(loader):
+                break
 
     return epoch_loss, n_samples
 
 def main():
+
+    np.random.seed(RANDOM_STATE)
+    torch.manual_seed(RANDOM_STATE)
+
+    torch.set_float32_matmul_precision("high")
     
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -226,39 +268,47 @@ def main():
 
     logger = logging.getLogger(__name__)
 
-    mean, std = _compute_stats()
-
     best_loss = float("inf")
 
     loaders = create_loaders(DATASET_PATH, TRAIN_VAL_TEST_SPLIT, BATCH_SIZE, n_rows=N_ROWS)
+
+    mean, std = _compute_stats(loaders["train"], stats_file=f"{DATASET_PATH}.stats.pt")
+
+    mean = mean.to(device)
+    std = std.to(device)
 
     for epoch in range(EPOCHS):
             
         epoch_loss, n_train = train_epoch_dl(autoencoder, loaders["train"],
                                                   optimizer, huber_loss, device, logger, mean=mean, std=std)
             
-        val_loss, n_val = eval_epoch_dl(autoencoder, loaders["val"],
+        if epoch > 0 and epoch % VAL_EVERY == 0:
+            val_loss, n_val = eval_epoch_dl(autoencoder, loaders["val"],
                                             huber_loss, device, mean=mean, std=std)
-            
-        test_loss, n_test = eval_epoch_dl(autoencoder, loaders["test"],
-                                              huber_loss, device, mean=mean, std=std)
 
-            
-        if val_loss < best_loss and epoch > 0:
-            logger.info(f"Saved weights to {MODEL_FILE}")
-            torch.save(autoencoder.state_dict(), MODEL_FILE)
-            best_loss = val_loss
+            val_loss   = val_loss    / n_val    if n_val    else float("nan")
+            if val_loss < best_loss:
+                logger.info(f"Saved weights to {MODEL_FILE}")
+                torch.save(autoencoder.state_dict(), MODEL_FILE)
+                best_loss = val_loss
 
         epoch_loss = epoch_loss  / n_train if n_train  else float("nan")
-        val_loss   = val_loss    / n_val    if n_val    else float("nan")
-        test_loss  = test_loss   / n_test   if n_test   else float("nan")
 
-        logger.info(f"Epoch {epoch+1:02d} – "
-                    f"train {epoch_loss:.8f} | "
-                    f"val   {val_loss:.8f} | "
-                    f"test  {test_loss:.8f}")
+        log_string = f"Epoch {epoch+1:02d} - train {epoch_loss}"
+
+        if epoch > 0 and epoch % VAL_EVERY == 0:
+            log_string += f" | val {val_loss:.8f}"
+
+        logger.info(log_string)
 
         scheduler.step()
+
+    test_loss, n_test = eval_epoch_dl(autoencoder, loaders["test"],
+                                        huber_loss, device, mean=mean, std=std)
+
+    test_loss  = test_loss   / n_test   if n_test   else float("nan")
+
+    print(f"Test loss: {test_loss}")
 
 if __name__ == "__main__":
     main()
