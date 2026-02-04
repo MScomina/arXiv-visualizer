@@ -2,10 +2,12 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import torch
+import json
 import jsonlines
 import pyarrow.parquet as pq
-import itertools
+import sqlite3
 import math
+import re
 from torch.utils.data import IterableDataset
 
 class EmbeddingStreamDataset(IterableDataset):
@@ -58,17 +60,36 @@ class SubsetIterable(IterableDataset):
 
     def __len__(self):
         return len(self.sampler)
-
-def read_row_parquet(path : str, cols : list[str], predicate : list[str]) -> dict:
-    row = pq.read_table(
-        path,
-        columns=cols,
-        filters=predicate
-    ).to_pydict()
-
-    return row
     
-def stream_dataset(path : str, cols : list[str], nrows : int, chunk_size : int, needs_torch_tensor : bool = False) -> dict:
+def fetch_rows(conn : sqlite3.Connection, search_substring : str, target_col : str, select_cols : list[str], max_rows : int = 10, table_name : str = "data"):
+
+    quoted_cols = ", ".join(f'"{c}"' for c in select_cols)
+    quoted_target_col = f'"{target_col}"'
+    quoted_table = f'"{table_name}"'
+
+    sql = f"""
+        SELECT {quoted_cols}
+        FROM {quoted_table}
+        WHERE {quoted_target_col} LIKE ?
+        ORDER BY id
+        LIMIT ?
+    """
+
+    pattern = f"%{search_substring}%"
+
+    cursor = conn.cursor()
+    cursor.execute(sql, (pattern, max_rows))
+    result = cursor.fetchall()
+
+    col_names = [desc[0] for desc in cursor.description]
+    data_dict: dict[str, list] = {col: [] for col in col_names}
+    for row in result:
+        for col, val in zip(col_names, row):
+            data_dict[col].append(val)
+
+    return data_dict
+        
+def stream_dataset(path : str, cols : list[str], n_rows : int, chunk_size : int, needs_torch_tensor : bool = False) -> dict:
     '''
         Streams a dataset in chunks of the form {col1: [...], col2: [...] ...}.
     '''
@@ -79,13 +100,51 @@ def stream_dataset(path : str, cols : list[str], nrows : int, chunk_size : int, 
     suffix = p.suffix.lower()
 
     if suffix in {".json", ".jsonl", ".jsonlines"}:
-        return _stream_dataset_jsonl(path, cols, nrows, chunk_size)
+        return _stream_dataset_jsonl(path, cols, n_rows, chunk_size)
     if suffix == ".parquet":
-        return _stream_dataset_parquet(path, cols, nrows, chunk_size, needs_torch_tensor=needs_torch_tensor)
+        return _stream_dataset_parquet(path, cols, n_rows, chunk_size, needs_torch_tensor=needs_torch_tensor)
+    if suffix in {".sqlite3", ".sql"}:
+        return _stream_dataset_sql(path, cols, n_rows, chunk_size)
     else:
         raise NotImplementedError(f"File format not supported: {suffix}")
 
-def _stream_dataset_parquet(path : str, cols : list[str], nrows : int, chunk_size : int, needs_torch_tensor : bool = False):
+def _stream_dataset_sql(path : str, cols : list[str], n_rows : int, chunk_size : int):
+    
+    conn = sqlite3.connect(path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1")
+    table = cursor.fetchone()
+    if not table:
+        conn.close()
+        return
+    table_name = table[0]
+    cols_sql = ", ".join([f'"{c}"' for c in cols])
+    query = f"SELECT {cols_sql} FROM {table_name} ORDER BY id"
+    cursor.execute(query)
+    total_read = 0
+    while total_read < n_rows:
+        rows = cursor.fetchmany(chunk_size)
+        if not rows:
+            break
+        batch_len = len(rows)
+        data = {col: [] for col in cols}
+        for row in rows:
+            for idx, col in enumerate(cols):
+                if col == "embedding":
+                    data[col].append(json.loads(row[idx]))
+                else:
+                    data[col].append(row[idx])
+        needed = min(batch_len, n_rows - total_read)
+        if needed < batch_len:
+            for col in cols:
+                data[col] = data[col][:needed]
+            yield data
+            break
+        yield data
+        total_read += batch_len
+    conn.close()
+
+def _stream_dataset_parquet(path : str, cols : list[str], n_rows : int, chunk_size : int, needs_torch_tensor : bool = False):
 
     parquet_file = pq.ParquetFile(path, buffer_size=1024*1024, memory_map=True, pre_buffer=True)
 
@@ -98,8 +157,8 @@ def _stream_dataset_parquet(path : str, cols : list[str], nrows : int, chunk_siz
         else:
             data = batch.to_pydict()
 
-            if total_read + batch_len > nrows:
-                needed = nrows - total_read
+            if total_read + batch_len > n_rows:
+                needed = n_rows - total_read
                 data = {k: v[:needed] for k, v in data.items()}
                 yield data
                 break
@@ -107,12 +166,12 @@ def _stream_dataset_parquet(path : str, cols : list[str], nrows : int, chunk_siz
             yield data
         total_read += batch_len
 
-        if total_read >= nrows:
+        if total_read >= n_rows:
             break
 
     parquet_file.close()
 
-def _stream_dataset_jsonl(path : str, cols : list[str], nrows : int, chunk_size : int):
+def _stream_dataset_jsonl(path : str, cols : list[str], n_rows : int, chunk_size : int):
     current_line = 0
     with jsonlines.open(path) as reader:
         partial_data = {k : [] for k in cols}
@@ -120,7 +179,7 @@ def _stream_dataset_jsonl(path : str, cols : list[str], nrows : int, chunk_size 
             for k in cols:
                 partial_data[k].append(obj[k])
             current_line += 1
-            if current_line >= nrows:
+            if current_line >= n_rows:
                 if len(partial_data[cols[0]]) != 0:
                     yield partial_data
                     partial_data = {k : [] for k in cols}
