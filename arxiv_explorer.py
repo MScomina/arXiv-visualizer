@@ -25,11 +25,16 @@ def get_sql_connection():
 
 @st.cache_data(max_entries=5000)
 def fetch_data(field: str, value: str | tuple[str], _conn: sqlite3.Connection, cols : tuple[str, ...] = ("id", "title", "abstract", "embedding")):
+    if isinstance(value, tuple):
+        max_rows = len(value)
+    else:
+        max_rows = 10
     return fetch_rows(
         conn=_conn,
         search_substring=value,
         target_col=field,
-        select_cols=list(cols)
+        select_cols=list(cols),
+        max_rows=max_rows
     )
 
 conn = get_sql_connection()
@@ -56,6 +61,10 @@ search_value = st.text_input(
 
 # Search logic
 if st.button("Search"):
+    if stss.get("network", False):
+        del stss.network
+    if stss.get("selected_paper", False):
+        del stss.selected_paper
     if not search_value:
         st.warning("Please enter a value to search.")
     else:
@@ -102,7 +111,7 @@ if stss.get("search_results", False):
             stss.selected_paper["id"] = selected_paper_id
             stss.selected_paper["title"] = stss.search_results["title"][selected_index]
             stss.selected_paper["abstract"] = stss.search_results["abstract"][selected_index]
-            stss.selected_paper["embedding"] = stss.search_results["embedding"][selected_index]
+            stss.selected_paper["embedding"] = json.loads(stss.search_results["embedding"][selected_index])
 
 
 # Network graph creation logic
@@ -113,7 +122,7 @@ if stss.get("selected_paper", False):
         stss.network.add_node(stss.selected_paper["id"], label=stss.selected_paper["id"], title=stss.selected_paper["title"],
                                 shape="dot", color="#FF4136", physics=False)
 
-        np_embedding = np.array(json.loads(stss.selected_paper["embedding"]), dtype=np.float16)
+        np_embedding = np.array(stss.selected_paper["embedding"], dtype=np.float16)
         np_embedding = np_embedding/la.norm(np_embedding)
         first_similarity, first_indices = index.search(np_embedding.reshape(1,-1), N_NEIGHBORS+1)
 
@@ -143,6 +152,8 @@ if stss.get("selected_paper", False):
 
         second_neighbors = tuple(index_to_id[index] for index in second_indices.flatten())
 
+        print(second_neighbors)
+
         s_neighbors_data = fetch_data(
             field="id",
             value=second_neighbors,
@@ -151,16 +162,12 @@ if stss.get("selected_paper", False):
         )
 
         for id_, title in zip(s_neighbors_data["id"], s_neighbors_data["title"]):
-            if id_ not in first_neighbors and id_ != stss.selected_paper["id"]:
-                stss.network.add_node(id_, label=id_, title=title, shape="dot", color="#36FF41", physics=False)
+            stss.network.add_node(id_, label=id_, title=title, shape="dot", color="#36FF41", physics=False)
 
         for i, first_id in enumerate(first_neighbors):
             for j in range(N_NEIGHBORS):
                 second_id = index_to_id[second_indices[i, j]]
                 weight = second_similarity[i, j].item()
-                if first_id == second_id:
-                    print(i, j)
-                    print(first_id)
 
                 stss.network.add_edge(
                     first_id,

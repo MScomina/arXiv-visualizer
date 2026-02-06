@@ -76,7 +76,7 @@ def fetch_rows(conn : sqlite3.Connection, search_substring : str | tuple[str], t
             ORDER BY id
             LIMIT ?
         """
-        params = (*search_substring, max_rows*5) 
+        params = (*search_substring, max_rows) 
     else:
         pattern = f"%{search_substring}%"
         sql = f"""
