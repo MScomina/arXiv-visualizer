@@ -61,24 +61,36 @@ class SubsetIterable(IterableDataset):
     def __len__(self):
         return len(self.sampler)
     
-def fetch_rows(conn : sqlite3.Connection, search_substring : str, target_col : str, select_cols : list[str], max_rows : int = 10, table_name : str = "data"):
+def fetch_rows(conn : sqlite3.Connection, search_substring : str | tuple[str], target_col : str, select_cols : list[str], max_rows : int = 10, table_name : str = "data"):
 
     quoted_cols = ", ".join(f'"{c}"' for c in select_cols)
     quoted_target_col = f'"{target_col}"'
     quoted_table = f'"{table_name}"'
 
-    sql = f"""
-        SELECT {quoted_cols}
-        FROM {quoted_table}
-        WHERE {quoted_target_col} LIKE ?
-        ORDER BY id
-        LIMIT ?
-    """
+    if target_col == "id" and isinstance(search_substring, tuple):
+        placeholders = ",".join("?" for _ in search_substring)
+        sql = f"""
+            SELECT {quoted_cols}
+            FROM {quoted_table}
+            WHERE {quoted_target_col} IN ({placeholders})
+            ORDER BY id
+            LIMIT ?
+        """
+        params = (*search_substring, max_rows*5) 
+    else:
+        pattern = f"%{search_substring}%"
+        sql = f"""
+            SELECT {quoted_cols}
+            FROM {quoted_table}
+            WHERE {quoted_target_col} LIKE ?
+            ORDER BY id
+            LIMIT ?
+        """
+        params = (pattern, max_rows)
 
-    pattern = f"%{search_substring}%"
 
     cursor = conn.cursor()
-    cursor.execute(sql, (pattern, max_rows))
+    cursor.execute(sql, params)
     result = cursor.fetchall()
 
     col_names = [desc[0] for desc in cursor.description]
