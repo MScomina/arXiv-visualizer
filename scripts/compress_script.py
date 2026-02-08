@@ -23,8 +23,8 @@ HIDDEN_LAYERS = ast.literal_eval(
 )
 LATENT_SPACE = int(os.getenv("LATENT_SPACE", 64))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE_COMP", 2048))
-CHUNK_SIZE = int(os.getenv('CHUNK_SIZE_COMP', str(BATCH_SIZE*16)))
-N_ROWS = int(os.getenv('N_PROCESSED_ROWS', 2914060))
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE_COMP", str(BATCH_SIZE*16)))
+N_ROWS = int(os.getenv("N_PROCESSED_ROWS", 2914060))
 
 DATASET_PATH = os.getenv("EMBEDDINGS_PATH", "./data/processed/embeddings.parquet")
 COMPRESSED_PATH = os.getenv("COMPRESSED_PATH", "./data/processed/compressed_embeddings.sqlite3")

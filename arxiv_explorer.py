@@ -8,8 +8,13 @@ from helper.data_loader import fetch_rows
 from helper.nearest_neighbors import build_faiss_index
 from pyvis.network import Network
 
-DATASET_PATH = "./data/processed/compressed_embeddings.sqlite3"
-N_NEIGHBORS = 6
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+DATASET_PATH = os.getenv("COMPRESSED_PATH", "./data/processed/compressed_embeddings.sqlite3")
+N_NEIGHBORS = int(os.getenv("GRAPH_NEIGHBORS", 6))
 
 stss = st.session_state
 

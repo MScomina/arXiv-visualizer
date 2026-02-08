@@ -12,10 +12,14 @@ import faiss
 
 from helper.data_loader import stream_dataset
 
-COMPRESSED_PATH = "./data/processed/compressed_embeddings.parquet"
-N_ROWS = 2_914_060
-CHUNK_SIZE = 500_000
-EMBEDDING_DIMENSION = 64
+from dotenv import load_dotenv
+
+load_dotenv()
+
+COMPRESSED_PATH = os.getenv("COMPRESSED_PATH", "./data/processed/compressed_embeddings.sqlite3")
+N_ROWS = int(os.getenv("N_PROCESSED_ROWS", 2914060))
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE_FAISS", 200000))
+EMBEDDING_DIMENSION = int(os.getenv("LATENT_SPACE", 64))
 
 HNSW_M = 16
 HNSW_EFCONSTRUCTION = 200
