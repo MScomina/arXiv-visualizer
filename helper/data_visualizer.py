@@ -3,15 +3,19 @@ import json
 import random
 import numpy as np
 import matplotlib.pyplot as plt
-import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from scipy.spatial import procrustes
 from scipy.linalg import orthogonal_procrustes
 
 from data_loader import stream_dataset
 
-DATASET_PATH = "./data/processed/embeddings.parquet"
-COMPRESSED_PATH = "./data/processed/compressed_embeddings.parquet"
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+DATASET_PATH = os.getenv("EMBEDDINGS_PATH", "./data/processed/embeddings.parquet")
+COMPRESSED_PATH = os.getenv("COMPRESSED_PATH", "./data/processed/compressed_embeddings.sqlite3")
 
 # UMAP parameters
 N_SAMPLES = 50000

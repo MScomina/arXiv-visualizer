@@ -1,5 +1,4 @@
 import streamlit as st
-import pandas as pd
 import numpy as np
 from numpy import linalg as la
 import sqlite3
@@ -10,7 +9,7 @@ from helper.nearest_neighbors import build_faiss_index
 from pyvis.network import Network
 
 DATASET_PATH = "./data/processed/compressed_embeddings.sqlite3"
-N_NEIGHBORS = 10
+N_NEIGHBORS = 6
 
 stss = st.session_state
 
@@ -107,6 +106,8 @@ if stss.get("search_results", False):
             while selected_paper_id != stss.search_results["id"][selected_index]:
                 selected_index += 1
 
+            if selected_paper_id != stss.get("selected_paper", {}).get("id", False) and stss.get("network", False):
+                del stss.network
             stss.selected_paper = dict()
             stss.selected_paper["id"] = selected_paper_id
             stss.selected_paper["title"] = stss.search_results["title"][selected_index]
@@ -152,8 +153,6 @@ if stss.get("selected_paper", False):
 
         second_neighbors = tuple(index_to_id[index] for index in second_indices.flatten())
 
-        print(second_neighbors)
-
         s_neighbors_data = fetch_data(
             field="id",
             value=second_neighbors,
@@ -167,6 +166,8 @@ if stss.get("selected_paper", False):
         for i, first_id in enumerate(first_neighbors):
             for j in range(N_NEIGHBORS):
                 second_id = index_to_id[second_indices[i, j]]
+                if second_id == stss.selected_paper["id"]:
+                    continue
                 weight = second_similarity[i, j].item()
 
                 stss.network.add_edge(

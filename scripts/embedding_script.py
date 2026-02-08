@@ -12,13 +12,20 @@ from helper.embedder import embed_batch
 from helper.data_loader import stream_dataset
 from transformers import AutoTokenizer, AutoModel
 
-N_ROWS = 2_914_060
-BATCH_SIZE = 64
-CHUNK_SIZE = BATCH_SIZE*128
-DATASET_PATH = "./data/arxiv-metadata-oai-snapshot.json"
-PROCESSED_FILE = "./data/processed/embeddings.parquet"
+from tqdm import tqdm
+from dotenv import load_dotenv
+
+load_dotenv()
+
+N_ROWS = int(os.getenv("N_PROCESSED_ROWS", 2914060))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE_EMB", 64))
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE_EMB", BATCH_SIZE * 128))
+DATASET_PATH = os.getenv("DATASET_PATH", "./data/arxiv-metadata-oai-snapshot.json")
+PROCESSED_FILE = os.getenv("EMBEDDINGS_PATH", "./data/processed/embeddings.parquet")
 
 def main():
+
+    total_chunks = (N_ROWS + CHUNK_SIZE - 1) // CHUNK_SIZE
 
     if os.path.exists(PROCESSED_FILE):
         response = input("Semantic embeddings already exist, regenerate them? (y to proceed): ").strip().lower()
@@ -43,7 +50,11 @@ def main():
 
     writer : pq.ParquetWriter | None = None
 
-    for chunk in stream_dataset(DATASET_PATH, ["id", "title", "abstract"], N_ROWS, CHUNK_SIZE):
+    for chunk in tqdm(
+        stream_dataset(DATASET_PATH, ["id", "title", "abstract"], N_ROWS, CHUNK_SIZE),
+        total=total_chunks,
+        desc="Processing embeddings"
+    ):
 
         embeddings = embed_batch(
             chunk["abstract"], 

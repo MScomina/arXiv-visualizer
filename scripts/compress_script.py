@@ -4,8 +4,7 @@ import json
 import torch
 import sqlite3
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
+from tqdm import tqdm
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
@@ -13,17 +12,23 @@ if ROOT_DIR not in sys.path:
 
 from autoencoder.autoencoder import AE
 from helper.data_loader import stream_dataset
+from dotenv import load_dotenv
+import ast
 
-IN_DIMENSIONS = 768
-HIDDEN_LAYERS = (512, 512, 384, 384, 256, 256, 192, 192, 128, 128)
-LATENT_SPACE = 64
-BATCH_SIZE = 2048
-CHUNK_SIZE = BATCH_SIZE*16
-MAX_ROWS = 2_914_060
+load_dotenv()
 
-DATASET_PATH = "./data/processed/embeddings.parquet"
-COMPRESSED_PATH = "./data/processed/compressed_embeddings.sqlite3"
-AUTOENCODER_PATH = f"./models/ae - {HIDDEN_LAYERS} - {LATENT_SPACE}.pt"
+IN_DIMENSIONS = int(os.getenv("IN_DIMENSIONS", 768))
+HIDDEN_LAYERS = ast.literal_eval(
+    os.getenv("HIDDEN_LAYERS", "(512, 512, 384, 384, 256, 256, 192, 192, 128, 128)")
+)
+LATENT_SPACE = int(os.getenv("LATENT_SPACE", 64))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE_COMP", 2048))
+CHUNK_SIZE = int(os.getenv('CHUNK_SIZE_COMP', str(BATCH_SIZE*16)))
+N_ROWS = int(os.getenv('N_PROCESSED_ROWS', 2914060))
+
+DATASET_PATH = os.getenv("EMBEDDINGS_PATH", "./data/processed/embeddings.parquet")
+COMPRESSED_PATH = os.getenv("COMPRESSED_PATH", "./data/processed/compressed_embeddings.sqlite3")
+AUTOENCODER_PATH = f"{os.getenv("AUTOENCODER_PATH", f"./models/ae - {HIDDEN_LAYERS} - {LATENT_SPACE}")}.pt"
 
 def _normalize(batch : torch.Tensor, mean, std) -> torch.Tensor | None:
     return (batch - mean) / std
@@ -34,8 +39,7 @@ def _load_stats(path: str = DATASET_PATH):
         cached = torch.load(stats_file)
         return cached["mean"], cached["std"]
     else:
-        print("Mean and std file not found, please run training_ae_script.py first.")
-        return
+        raise FileNotFoundError("Mean and std file not found, please run training_ae_script.py first.")
 
 def load_autoencoder():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -48,9 +52,11 @@ def load_autoencoder():
 
     try:
         model.load_state_dict(torch.load(AUTOENCODER_PATH, weights_only=True))
-    except FileNotFoundError:
-        print("Model not found, run training_script.py first. Exiting.")
-        return None
+    except FileNotFoundError as e:
+        raise FileNotFoundError(
+            f"Model not found at '{AUTOENCODER_PATH}'. "
+            "Run training_script.py first."
+        ) from e
 
     model.eval()
     return model
@@ -82,7 +88,11 @@ def main():
     """)
     conn.commit()
 
-    for chunk in stream_dataset(DATASET_PATH, ["id", "title", "embedding", "abstract"], MAX_ROWS, CHUNK_SIZE):
+    total_chunks = (N_ROWS + CHUNK_SIZE - 1) // CHUNK_SIZE
+
+    for chunk in tqdm(stream_dataset(DATASET_PATH, ["id", "title", "embedding", "abstract"], N_ROWS, CHUNK_SIZE), 
+                    total=total_chunks,
+                    desc="Compressing embeddings"):
         batch_embeddings = torch.tensor(
             chunk["embedding"],
             dtype=torch.float32,

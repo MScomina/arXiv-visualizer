@@ -1,5 +1,4 @@
 from pathlib import Path
-import pandas as pd
 import numpy as np
 import torch
 import json
@@ -8,31 +7,72 @@ import pyarrow.parquet as pq
 import sqlite3
 import math
 import re
+import random
 from torch.utils.data import IterableDataset
 
 class EmbeddingStreamDataset(IterableDataset):
-    def __init__(self, path: str,
+    
+    def __init__(self,
+                 path: str,
                  batch_size: int,
                  dtype: torch.dtype,
-                 n_rows: int | None = None):
+                 n_rows: int | None = None,
+                 shuffle: bool = True,
+                 reservoir_rows: int | None = None):
         super().__init__()
         self.path = path
         self.dtype = dtype
         self.n_rows = n_rows
         self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.reservoir_rows = reservoir_rows or (4 * batch_size)
 
         total_rows = self.n_rows if self.n_rows is not None else N_ROWS
         self._num_chunks = math.ceil(total_rows / self.batch_size)
 
     def __iter__(self):
+        reservoir: torch.Tensor = torch.empty(0, 0, dtype=self.dtype)
+        reservoir_row_count = 0
+
         for chunk in stream_dataset(
-            self.path,
-            ["embedding"],
-            self.n_rows if self.n_rows is not None else N_ROWS,
-            self.batch_size,
-            needs_torch_tensor=True
-        ):
-            yield chunk["embedding"]
+                self.path,
+                ["embedding"],
+                self.n_rows if self.n_rows is not None else N_ROWS,
+                self.batch_size,
+                needs_torch_tensor=True):
+            embedding = chunk["embedding"]
+            if reservoir.size(1) == 0:
+                reservoir = torch.empty(0, embedding.size(1), dtype=self.dtype)
+            reservoir = torch.cat([reservoir, embedding], dim=0)
+            reservoir_row_count += embedding.shape[0]
+
+            while reservoir_row_count >= self.reservoir_rows:
+                if self.shuffle:
+                    perm = torch.randperm(reservoir.size(0), device=reservoir.device)
+                    reservoir = reservoir[perm]
+
+                num_full = reservoir.size(0) // self.batch_size // 2
+                for i in range(num_full):
+                    start = i * self.batch_size
+                    end = start + self.batch_size
+                    yield reservoir[start:end]
+
+                reservoir = reservoir[num_full * self.batch_size :]
+                if reservoir.numel() > 0:
+                    reservoir_row_count = reservoir.size(0)
+                else:
+                    reservoir = torch.empty(0, 0, dtype=self.dtype)
+                    reservoir_row_count = 0
+
+        if reservoir:
+            if self.shuffle:
+                perm = torch.randperm(reservoir.size(0), device=reservoir.device)
+                reservoir = reservoir[perm]
+
+            for i in range(0, reservoir.size(0), self.batch_size):
+                yield reservoir[i : i + self.batch_size]
+
+        assert total_yielded == (self.n_rows if self.n_rows is not None else N_ROWS)
 
     def __len__(self):
         return self._num_chunks
@@ -165,7 +205,11 @@ def _stream_dataset_parquet(path : str, cols : list[str], n_rows : int, chunk_si
     for batch in parquet_file.iter_batches(batch_size=chunk_size, columns=cols, use_threads=True):
         batch_len = len(batch)
         if needs_torch_tensor:
-            yield {k: torch.Tensor(v).to(torch.float32) for k, v in batch.to_pydict().items()}
+            # Assuming we're fetching just the embeddings, since it's the only time we need torch tensors.
+            # It's VERY IMPORTANT to be careful with double copies, since that can tank the I/O speed real fast.
+            emb_obj = batch.column("embedding").to_numpy(zero_copy_only=False)
+            emb_np = np.stack([np.array(e, dtype=np.float16) for e in emb_obj])
+            yield {"embedding": torch.from_numpy(emb_np)}
         else:
             data = batch.to_pydict()
 

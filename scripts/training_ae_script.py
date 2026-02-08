@@ -1,8 +1,6 @@
 import numpy as np
 import torch
-import torch.nn.functional as F
-import hashlib
-import pandas as pd
+from tqdm import tqdm
 
 import logging
 import os
@@ -17,33 +15,49 @@ if ROOT_DIR not in sys.path:
 from helper.data_loader import stream_dataset, EmbeddingStreamDataset, SubsetIterable
 from autoencoder.autoencoder import AE
 
+from dotenv import load_dotenv
+import ast
+
+load_dotenv()
+
 RANDOM_STATE = 31412718
 
-EPOCHS = 25
-TRAINING_RATE = 0.0002
-DROPOUT = 0.1
-GAMMA = 0.95
-WEIGHT_DECAY = 1e-5
-TRAIN_VAL_TEST_SPLIT = (0.8, 0.1, 0.1)
+EPOCHS = int(os.getenv("TRAINING_EPOCHS", 150))
+TRAINING_RATE = float(os.getenv("TRAINING_LR", 2e-4))
+DROPOUT = float(os.getenv("DROPOUT", 0.1))
+GAMMA = float(os.getenv("GAMMA", 0.95))
+WEIGHT_DECAY = float(os.getenv("WEIGHT_DECAY", 1e-5))
 
-IN_DIMENSIONS = 768
-HIDDEN_LAYERS = (512, 512, 384, 384, 256, 256, 192, 192, 128, 128)
-LATENT_SPACE = 64
+split_str = os.getenv("TRAIN_VAL_TEST_SPLIT", "0.8,0.1,0.1")
+TRAIN_VAL_TEST_SPLIT = tuple(map(float, split_str.split(',')))
 
-DATASET_PATH = "./data/processed/embeddings.parquet"
-LOG_FILE = f"./models/ae - {HIDDEN_LAYERS} - {LATENT_SPACE}.log"
-MODEL_FILE = f"./models/ae - {HIDDEN_LAYERS} - {LATENT_SPACE}.pt"
+if sum(TRAIN_VAL_TEST_SPLIT) > 1.0 + 1e-4 or sum(TRAIN_VAL_TEST_SPLIT) < 1.0 - 1e-4:
+    raise ValueError(
+        f"TRAIN_VAL_TEST_SPLIT must sum to 1.0. "
+        f"Got {sum(TRAIN_VAL_TEST_SPLIT):.6f}"
+    )
+
+IN_DIMENSIONS = int(os.getenv("IN_DIMENSIONS", 768))
+
+HIDDEN_LAYERS = ast.literal_eval(
+    os.getenv('HIDDEN_LAYERS', "(512, 512, 384, 384, 256, 256, 192, 192, 128, 128)")
+)
+
+LATENT_SPACE = int(os.getenv("LATENT_SPACE", 64))
+
+DATASET_PATH = os.getenv("EMBEDDINGS_PATH", "./data/processed/embeddings.parquet")
+AUTOENCODER_PATH = os.getenv("AUTOENCODER_PATH", f"./models/ae - {HIDDEN_LAYERS} - {LATENT_SPACE}")
+LOG_FILE = f"{AUTOENCODER_PATH}.log"
+MODEL_FILE = f"{AUTOENCODER_PATH}.pt"
 
 # Lower either of these numbers if you're having problems with RAM.
-N_ROWS = 2_914_060
-BATCH_SIZE = 16384
-MINIBATCH_AMOUNT = 8
-PREFETCH_FACTOR = 1
+N_ROWS = int(os.getenv("N_PROCESSED_ROWS", 2914060))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE_TR", 32768))
+MINIBATCH_AMOUNT = int(os.getenv("MINIBATCH_AMOUNT", 16))
+PREFETCH_FACTOR = int(os.getenv("PREFETCH_FACTOR", 2))
+NUM_WORKERS = int(os.getenv("NUM_WORKERS", 8))
 
-VAL_EVERY = 10
-
-# Adjust this based on your computer specs.
-NUM_WORKERS = 8
+VAL_EVERY = 5
 
 PRINT_EVERY = 25
 
@@ -164,38 +178,52 @@ def split_indices(num_samples: int, ratios: tuple[float, float, float], seed: in
 
     return train_idx, val_idx, test_idx
 
-def train_epoch_dl(autoencoder, loader, optimizer, loss_fn, device, logger, mean = 0, std = 1):
-
+def train_epoch_dl(autoencoder, loader, optimizer, loss_fn, device, logger,
+                   mean=0, std=1):
+                   
     autoencoder.train()
     epoch_loss, n_samples = 0.0, 0
     batch_cnt = 0
 
-    for large_batch in loader:
+    outer_iter = tqdm(
+        loader,
+        total=len(loader) * MINIBATCH_AMOUNT,
+        unit="batch",
+        desc="Training",
+        leave=False,
+        bar_format="{l_bar}{bar}|{postfix}",
+    )
+
+    for large_batch in outer_iter:
         large_batch = large_batch.to(device)
         large_batch = _normalize(large_batch, mean, std)
 
         mini_size = BATCH_SIZE // MINIBATCH_AMOUNT
 
         for batch in torch.split(large_batch, mini_size, dim=0):
-            
             x = batch
             optimizer.zero_grad()
             recon = autoencoder(x)
-            loss  = loss_fn(recon, x)
+            loss = loss_fn(recon, x)
             loss.backward()
             optimizer.step()
 
             epoch_loss += loss.item() * x.size(0)
-            n_samples  += x.size(0)
-            batch_cnt  += 1
+            n_samples += x.size(0)
+            batch_cnt += 1
 
             if batch_cnt % PRINT_EVERY == 0:
                 avg_loss = epoch_loss / n_samples
-                logger.info(f"[{batch_cnt:>6d} train] "
-                            f"avg train loss (so far) = {avg_loss:.8f}")
+                outer_iter.set_postfix(avg_loss=f"{avg_loss:.8f}")
 
-        if batch_cnt >= len(loader)*MINIBATCH_AMOUNT:
+            outer_iter.update(1)
+
+        if batch_cnt >= len(loader) * MINIBATCH_AMOUNT:
             break
+
+    avg_loss = epoch_loss / n_samples
+    outer_iter.set_postfix(avg_loss=f"{avg_loss:.8f}")
+    outer_iter.close()
 
     return epoch_loss, n_samples
 
@@ -308,7 +336,7 @@ def main():
 
     test_loss  = test_loss   / n_test   if n_test   else float("nan")
 
-    print(f"Test loss: {test_loss}")
+    logger.info(f"Test loss: {test_loss}")
 
 if __name__ == "__main__":
     main()
