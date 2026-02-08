@@ -13,14 +13,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+N_ROWS = int(os.getenv("N_PROCESSED_ROWS", 2914060))
 DATASET_PATH = os.getenv("COMPRESSED_PATH", "./data/processed/compressed_embeddings.sqlite3")
 N_NEIGHBORS = int(os.getenv("GRAPH_NEIGHBORS", 6))
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE_FAISS", 200000))
 
 stss = st.session_state
 
 @st.cache_resource(show_spinner=False)
 def get_index():
-    index, index_to_id = build_faiss_index(n_rows=3_000_000, chunk_size=100_000)
+    index, index_to_id = build_faiss_index(n_rows=N_ROWS, chunk_size=CHUNK_SIZE)
     return index, index_to_id
 
 @st.cache_resource(show_spinner=False)
@@ -125,8 +127,14 @@ if stss.get("selected_paper", False):
     if st.button("Find nearest papers"):
 
         stss.network = Network(height="400px", width="100%", bgcolor="#222222", font_color="white")
-        stss.network.add_node(stss.selected_paper["id"], label=stss.selected_paper["id"], title=stss.selected_paper["title"],
-                                shape="dot", color="#FF4136", physics=False)
+        stss.network.add_node(
+            stss.selected_paper["id"],
+            label=stss.selected_paper["id"], 
+            title=stss.selected_paper["title"],
+            shape="dot", 
+            color="#FF4136", 
+            physics=False
+            )
 
         np_embedding = np.array(stss.selected_paper["embedding"], dtype=np.float16)
         np_embedding = np_embedding/la.norm(np_embedding)
@@ -144,8 +152,14 @@ if stss.get("selected_paper", False):
             cols=("id", "title", "abstract", "embedding")
         )
         for k in range(N_NEIGHBORS):
-            stss.network.add_node(f_neighbors_data["id"][k], label=f_neighbors_data["id"][k], title=f_neighbors_data["title"][k],
-                                    shape="dot", color="#3641FF", physics=False)
+            stss.network.add_node(
+                f_neighbors_data["id"][k], 
+                label=f_neighbors_data["id"][k], 
+                title=f_neighbors_data["title"][k],
+                shape="dot", 
+                color="#3641FF", 
+                physics=False
+                )
             stss.network.add_edge(stss.selected_paper["id"], f_neighbors_data["id"][k], value=first_similarity[0][k].item(), color="#3641FF")
 
         first_np_embeddings = np.array([json.loads(f_neighbors_data["embedding"][l]) for l in range(N_NEIGHBORS)], dtype=np.float16)
@@ -166,7 +180,14 @@ if stss.get("selected_paper", False):
         )
 
         for id_, title in zip(s_neighbors_data["id"], s_neighbors_data["title"]):
-            stss.network.add_node(id_, label=id_, title=title, shape="dot", color="#36FF41", physics=False)
+            stss.network.add_node(
+                id_, 
+                label=id_, 
+                title=title, 
+                shape="dot", 
+                color="#36FF41", 
+                physics=False
+                )
 
         for i, first_id in enumerate(first_neighbors):
             for j in range(N_NEIGHBORS):

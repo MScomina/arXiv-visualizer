@@ -13,6 +13,7 @@ import faiss
 from helper.data_loader import stream_dataset
 
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 load_dotenv()
 
@@ -32,7 +33,10 @@ def build_faiss_index(path : str = COMPRESSED_PATH, n_rows : int = N_ROWS, chunk
 
     index_to_id = {}
 
-    for idx_chunk, chunk in enumerate(stream_dataset(path, ["id", "embedding"], n_rows, chunk_size)):
+    n_chunks = (n_rows + chunk_size - 1)//chunk_size
+    for idx_chunk, chunk in enumerate(tqdm(stream_dataset(path, ["id", "embedding"], n_rows, chunk_size), 
+                                        total=n_chunks,
+                                        desc="Creating FAISS index")):
 
         for idx, entry in enumerate(chunk["id"]):
             index_to_id[idx_chunk*chunk_size+idx] = chunk["id"][idx]
